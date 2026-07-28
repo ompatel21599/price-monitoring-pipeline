@@ -12,6 +12,7 @@ data — some sections will just show flat/first-run values.
 import os
 from datetime import datetime, timezone
 
+import qrcode
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -64,6 +65,15 @@ def compute_insights(df: pd.DataFrame) -> dict:
     insights["movers"] = movers
     return insights
 
+def make_qr_code() -> str:
+    os.makedirs(CHART_TMP_DIR, exist_ok=True)
+    dashboard_url = "https://ompatel21599.github.io/price-monitoring-pipeline/"
+    qr_path = os.path.join(CHART_TMP_DIR, "dashboard_qr.png")
+
+    img = qrcode.make(dashboard_url)
+    img.save(qr_path)
+
+    return qr_path
 
 def make_charts(df: pd.DataFrame) -> dict:
     os.makedirs(CHART_TMP_DIR, exist_ok=True)
@@ -289,6 +299,11 @@ def generate_pdf(df: pd.DataFrame, insights: dict, chart_paths: dict) -> None:
 
     story.append(Paragraph("Product Price Monitoring Report", title_style))
     story.append(Paragraph(f"Generated {generated_at}", muted_style))
+    story.append(Spacer(1, 12))
+
+    qr_path = make_qr_code()
+    story.append(RLImage(qr_path, width=1.3 * inch, height=1.3 * inch))
+    story.append(Paragraph("Scan to open the live interactive dashboard", muted_style))
     story.append(Spacer(1, 16))
 
     kpi_data = [
