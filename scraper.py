@@ -17,13 +17,17 @@ import requests
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://books.toscrape.com/"
-CATALOGUE_URL = BASE_URL + "catalogue/page-{}.html"
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 HISTORY_FILE = os.path.join(DATA_DIR, "price_history.csv")
 
-# How many category listing pages to scrape. The site has 50 pages of
-# ~20 products each. Keep this modest so runs are fast and polite.
-MAX_PAGES = 5
+# Categories to track. Each is scraped in full (usually 1-3 pages).
+CATEGORIES = {
+    "Travel": "travel_2",
+    "Mystery": "mystery_3",
+    "Fiction": "fiction_10",
+    "Fantasy": "fantasy_19",
+    "Science": "science_22",
+}
 
 RATING_WORDS = {"One": 1, "Two": 2, "Three": 3, "Four": 4, "Five": 5}
 
@@ -38,7 +42,7 @@ def fetch_page(url: str) -> BeautifulSoup:
     return BeautifulSoup(resp.text, "html.parser")
 
 
-def parse_product_card(card, run_timestamp: str) -> dict:
+def parse_product_card(card, run_timestamp: str, category: str) -> dict:
     title = card.h3.a["title"].strip()
 
     price_text = card.select_one(".price_color").get_text(strip=True)
@@ -57,36 +61,41 @@ def parse_product_card(card, run_timestamp: str) -> dict:
     return {
         "run_timestamp": run_timestamp,
         "title": title,
+        "category": category,
         "price_gbp": price,
         "in_stock": in_stock,
         "rating": rating,
         "product_url": product_url,
     }
 
-
-def scrape_all(max_pages: int = MAX_PAGES) -> list[dict]:
+def scrape_all() -> list[dict]:
     run_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     records = []
 
-    for page_num in range(1, max_pages + 1):
-        url = CATALOGUE_URL.format(page_num)
-        try:
-            soup = fetch_page(url)
-        except requests.HTTPError:
-            # We've run past the last available page
-            break
+    for category_name, category_slug in CATEGORIES.items():
+        page_num = 1
+        while True:
+            if page_num == 1:
+                url = f"{BASE_URL}catalogue/category/books/{category_slug}/index.html"
+            else:
+                url = f"{BASE_URL}catalogue/category/books/{category_slug}/page-{page_num}.html"
 
-        cards = soup.select("article.product_pod")
-        if not cards:
-            break
+            try:
+                soup = fetch_page(url)
+            except requests.HTTPError:
+                break
 
-        for card in cards:
-            records.append(parse_product_card(card, run_timestamp))
+            cards = soup.select("article.product_pod")
+            if not cards:
+                break
 
-        time.sleep(0.5)  # be polite to the server
+            for card in cards:
+                records.append(parse_product_card(card, run_timestamp, category_name))
+
+            page_num += 1
+            time.sleep(0.5)  # be polite to the server
 
     return records
-
 
 def append_to_history(records: list[dict]) -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -95,6 +104,7 @@ def append_to_history(records: list[dict]) -> None:
     fieldnames = [
         "run_timestamp",
         "title",
+        "category",
         "price_gbp",
         "in_stock",
         "rating",
