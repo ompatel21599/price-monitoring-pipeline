@@ -55,8 +55,8 @@ def compute_insights(df: pd.DataFrame) -> dict:
     movers = pd.DataFrame()
     if len(run_dates) >= 2:
         first_date, last_date = run_dates[0], run_dates[-1]
-        first = df[df["run_date"] == first_date].set_index("title")["price_gbp"]
-        last = df[df["run_date"] == last_date].set_index("title")["price_gbp"]
+        first = df[df["run_date"] == first_date].drop_duplicates(subset="title").set_index("title")["price_gbp"]
+        last = df[df["run_date"] == last_date].drop_duplicates(subset="title").set_index("title")["price_gbp"]
         joined = pd.concat([first, last], axis=1, keys=["first_price", "last_price"]).dropna()
         joined["change"] = joined["last_price"] - joined["first_price"]
         joined["pct_change"] = (joined["change"] / joined["first_price"] * 100).round(1)
