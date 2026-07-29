@@ -19,8 +19,10 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage, PageBreak
 )
+
+from ml_analysis import build_ml_summary
 
 BASE_DIR = os.path.dirname(__file__)
 DATA_FILE = os.path.join(BASE_DIR, "data", "price_history.csv")
@@ -77,14 +79,14 @@ def compute_insights(df: pd.DataFrame) -> dict:
 # ---------------------------------------------------------------------------
 # Matplotlib chart styling (used for the PDF only — HTML uses Chart.js)
 # ---------------------------------------------------------------------------
-PDF_BG = "#0b0f14"
-PDF_PANEL = "#11161d"
-PDF_TEXT = "#e8e6e0"
-PDF_MUTED = "#8a8f98"
-PDF_GOLD = "#d4a537"
-PDF_TEAL = "#3f8f8f"
-PDF_RED = "#c1554d"
-PDF_GRID = "#232a35"
+PDF_BG = "#ffffff"
+PDF_PANEL = "#f4f6f8"
+PDF_TEXT = "#1a1a1a"
+PDF_MUTED = "#6b7280"
+PDF_GOLD = "#b8862f"
+PDF_TEAL = "#2d6e6e"
+PDF_RED = "#a83e37"
+PDF_GRID = "#e2e5e9"
 
 
 def _style_ax(fig, ax, title):
@@ -188,6 +190,64 @@ def make_charts(df: pd.DataFrame) -> dict:
     fig.savefig(p6, dpi=150, facecolor=PDF_BG)
     plt.close(fig)
     paths["stock_donut"] = p6
+
+    return paths
+
+
+def make_ml_charts(df: pd.DataFrame, ml_summary: dict) -> dict:
+    """Charts specific to the ML findings: anomaly scatter and forecast lines."""
+    os.makedirs(CHART_TMP_DIR, exist_ok=True)
+    paths = {}
+
+    # Anomaly scatter: all latest-run products, colored by flagged/not
+    latest_date = df["run_date"].max()
+    latest = df[df["run_date"] == latest_date].reset_index(drop=True)
+    anomalies = ml_summary["anomalies"]
+    flagged_titles = set(anomalies["title"]) if not anomalies.empty else set()
+
+    fig, ax = plt.subplots(figsize=(6.6, 3.0))
+    colors_list = [PDF_RED if t in flagged_titles else PDF_TEAL for t in latest["title"]]
+    sizes = [55 if t in flagged_titles else 22 for t in latest["title"]]
+    ax.scatter(range(len(latest)), latest["price_gbp"], c=colors_list, s=sizes, alpha=0.85,
+               edgecolors=PDF_BG, linewidths=0.5)
+    _style_ax(fig, ax, "PRICE BY PRODUCT — ANOMALIES HIGHLIGHTED (LATEST RUN)")
+    ax.set_xticks([])
+    ax.set_ylabel("Price (£)", color=PDF_MUTED, fontsize=8)
+    fig.tight_layout()
+    p1 = os.path.join(CHART_TMP_DIR, "anomaly_scatter.png")
+    fig.savefig(p1, dpi=150, facecolor=PDF_BG)
+    plt.close(fig)
+    paths["anomaly_scatter"] = p1
+
+    # Forecast chart: actual vs projected for top forecasted products
+    forecasts = ml_summary["forecasts"]
+    if not forecasts.empty:
+        run_dates = sorted(df["run_date"].unique())
+        fig, ax = plt.subplots(figsize=(6.6, 3.2))
+        palette = [PDF_GOLD, PDF_TEAL, "#8a6bbf", "#c96f3e", "#4f8fcf"]
+        for i, title in enumerate(forecasts["title"].head(5)):
+            series = df[df["title"] == title].sort_values("run_date")
+            x_actual = list(range(len(series)))
+            y_actual = series["price_gbp"].values
+            color = palette[i % len(palette)]
+            ax.plot(x_actual, y_actual, marker="o", color=color, linewidth=1.8,
+                     markersize=4, label=title[:22])
+            forecast_row = forecasts[forecasts["title"] == title].iloc[0]
+            ax.plot([x_actual[-1], len(x_actual)], [y_actual[-1], forecast_row["forecast_price"]],
+                     linestyle="--", color=color, linewidth=1.5, alpha=0.7)
+            ax.scatter([len(x_actual)], [forecast_row["forecast_price"]], color=color,
+                        marker="D", s=35, zorder=5)
+        _style_ax(fig, ax, "FORECAST — TOP MOVERS (SOLID = ACTUAL, DASHED = PROJECTED)")
+        ax.set_ylabel("Price (£)", color=PDF_MUTED, fontsize=8)
+        ax.set_xticks(range(len(run_dates) + 1))
+        ax.set_xticklabels([str(d) for d in run_dates] + ["next"], rotation=30, fontsize=7)
+        legend = ax.legend(loc="upper left", fontsize=6.5, facecolor=PDF_PANEL,
+                            edgecolor=PDF_GRID, labelcolor=PDF_TEXT)
+        fig.tight_layout()
+        p2 = os.path.join(CHART_TMP_DIR, "forecast_lines.png")
+        fig.savefig(p2, dpi=150, facecolor=PDF_BG)
+        plt.close(fig)
+        paths["forecast_lines"] = p2
 
     return paths
 
@@ -670,215 +730,318 @@ def build_headline(df: pd.DataFrame, insights: dict) -> str:
     return " · ".join(parts) + "."
 
 
-PDF_INK = colors.HexColor("#0b0f14")
-PDF_PANEL_C = colors.HexColor("#11161d")
-PDF_TEXT_C = colors.HexColor("#e8e6e0")
-PDF_MUTED_C = colors.HexColor("#8a8f98")
-PDF_GOLD_C = colors.HexColor("#d4a537")
-PDF_TEAL_C = colors.HexColor("#3f8f8f")
-PDF_BORDER_C = colors.HexColor("#212933")
+DOC_NAVY = colors.HexColor("#16324f")
+DOC_GOLD = colors.HexColor("#b8862f")
+DOC_TEAL = colors.HexColor("#2d6e6e")
+DOC_RED = colors.HexColor("#a83e37")
+DOC_TEXT = colors.HexColor("#1a1a1a")
+DOC_MUTED = colors.HexColor("#6b7280")
+DOC_LINE = colors.HexColor("#d9dde3")
+DOC_PANEL = colors.HexColor("#f4f6f8")
 
 
-def draw_cover(canvas_obj, doc, insights, headline, qr_path, generated_at):
-    width, height = letter
-    canvas_obj.saveState()
-
-    canvas_obj.setFillColor(PDF_INK)
-    canvas_obj.rect(0, 0, width, height, fill=1, stroke=0)
-
-    margin = 0.65 * inch
-    y = height - margin
-
-    canvas_obj.setFillColor(PDF_GOLD_C)
-    canvas_obj.setFont("Courier-Bold", 9)
-    canvas_obj.drawString(margin, y - 10, "AUTOMATED MARKET INTELLIGENCE")
-    canvas_obj.drawRightString(width - margin, y - 10, generated_at.upper())
-    canvas_obj.setStrokeColor(PDF_BORDER_C)
-    canvas_obj.setLineWidth(0.75)
-    canvas_obj.line(margin, y - 20, width - margin, y - 20)
-
-    y -= 60
-    canvas_obj.setFillColor(PDF_TEXT_C)
-    canvas_obj.setFont("Helvetica-Bold", 26)
-    canvas_obj.drawString(margin, y, "Product Price Monitor")
-    y -= 20
-    canvas_obj.setFont("Courier", 10)
-    canvas_obj.setFillColor(PDF_MUTED_C)
-    canvas_obj.drawString(margin, y, "Weekly Report")
-
-    y -= 45
-    canvas_obj.setFillColor(PDF_GOLD_C)
-    canvas_obj.setFont("Helvetica-Bold", 13)
-    from textwrap import wrap
-    headline_lines = wrap(headline, width=62)
-    for line in headline_lines:
-        canvas_obj.drawString(margin, y, line)
-        y -= 18
-
-    y -= 30
-    canvas_obj.setFillColor(PDF_MUTED_C)
-    canvas_obj.setFont("Courier", 9)
-    canvas_obj.drawString(margin, y, "AVERAGE PRICE, LATEST RUN")
-    y -= 46
-    canvas_obj.setFillColor(PDF_GOLD_C)
-    canvas_obj.setFont("Helvetica-Bold", 54)
-    canvas_obj.drawString(margin, y, f"£{insights['avg_price_latest']}")
-
-    y -= 50
-    kpis = [
-        ("PRODUCTS", str(insights["num_products_tracked"])),
-        ("RUNS", str(insights["num_runs"])),
-        ("OUT OF STOCK", str(insights["out_of_stock_count"])),
-        ("AVG RATING", f"{insights['avg_rating_latest']}/5"),
-    ]
-    cell_w = (width - 2 * margin) / len(kpis)
-    canvas_obj.setStrokeColor(PDF_BORDER_C)
-    canvas_obj.setLineWidth(0.75)
-    canvas_obj.line(margin, y, width - margin, y)
-    for i, (label, value) in enumerate(kpis):
-        cx = margin + i * cell_w
-        if i > 0:
-            canvas_obj.line(cx, y, cx, y - 55)
-        canvas_obj.setFillColor(PDF_MUTED_C)
-        canvas_obj.setFont("Courier", 7.5)
-        canvas_obj.drawString(cx + 10, y - 18, label)
-        canvas_obj.setFillColor(PDF_TEXT_C)
-        canvas_obj.setFont("Courier-Bold", 17)
-        canvas_obj.drawString(cx + 10, y - 42, value)
-    canvas_obj.line(margin, y - 55, width - margin, y - 55)
-
-    qr_size = 0.95 * inch
-    qx = width - margin - qr_size
-    qy = margin + 10
-    canvas_obj.drawImage(qr_path, qx, qy, width=qr_size, height=qr_size)
-    canvas_obj.setFillColor(PDF_MUTED_C)
-    canvas_obj.setFont("Courier", 7)
-    canvas_obj.drawRightString(qx + qr_size, qy - 12, "SCAN FOR LIVE DASHBOARD")
-
-    canvas_obj.setFillColor(PDF_MUTED_C)
-    canvas_obj.setFont("Courier", 7.5)
-    canvas_obj.drawString(margin, margin + 30, "DATA SOURCE")
-    canvas_obj.setFillColor(PDF_TEXT_C)
-    canvas_obj.setFont("Courier", 8.5)
-    canvas_obj.drawString(margin, margin + 18, "books.toscrape.com (scraping sandbox)")
-    canvas_obj.setFillColor(PDF_MUTED_C)
-    canvas_obj.setFont("Courier", 7.5)
-    canvas_obj.drawString(margin, margin + 4, "PIPELINE: GitHub Actions, weekly automated run")
-
-    canvas_obj.restoreState()
-
-
-def draw_page_frame(canvas_obj, doc):
-    width, height = letter
-    canvas_obj.saveState()
-    canvas_obj.setStrokeColor(colors.HexColor("#e5e5e5"))
-    canvas_obj.setLineWidth(0.5)
-    canvas_obj.line(0.65 * inch, 0.55 * inch, width - 0.65 * inch, 0.55 * inch)
-    canvas_obj.setFillColor(colors.grey)
-    canvas_obj.setFont("Courier", 7.5)
-    canvas_obj.drawString(0.65 * inch, 0.4 * inch, "PRODUCT PRICE MONITOR — DATA APPENDIX")
-    canvas_obj.drawRightString(width - 0.65 * inch, 0.4 * inch, f"PAGE {doc.page - 1}")
-    canvas_obj.restoreState()
-
-
-def generate_pdf(df: pd.DataFrame, insights: dict, chart_paths: dict) -> None:
+def generate_pdf(df: pd.DataFrame, insights: dict, chart_paths: dict, ml_summary: dict) -> None:
     os.makedirs(REPORTS_DIR, exist_ok=True)
     out_path = os.path.join(REPORTS_DIR, "latest_report.pdf")
 
-    doc = SimpleDocTemplate(out_path, pagesize=letter,
-                             topMargin=0.75 * inch, bottomMargin=0.75 * inch,
-                             leftMargin=0.65 * inch, rightMargin=0.65 * inch)
-    section_style = ParagraphStyle("Section", fontSize=12, fontName="Courier-Bold",
-                                    textColor=PDF_GOLD_C, spaceBefore=4, spaceAfter=10)
-    caption_style = ParagraphStyle("Caption", fontSize=8.5, fontName="Helvetica",
-                                    textColor=colors.grey)
+    NAVY = colors.HexColor("#1f3a5f")
+    BLACK = colors.HexColor("#1a1a1a")
+    GREY = colors.HexColor("#555555")
+    LINE = colors.HexColor("#cccccc")
 
-    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    headline = build_headline(df, insights)
+    doc = SimpleDocTemplate(out_path, pagesize=letter,
+                             topMargin=0.85 * inch, bottomMargin=0.85 * inch,
+                             leftMargin=0.9 * inch, rightMargin=0.9 * inch)
+
+    title_style = ParagraphStyle("TitleCustom", fontName="Helvetica-Bold", fontSize=20,
+                                  textColor=BLACK, spaceAfter=4, leading=24)
+    subtitle_style = ParagraphStyle("Subtitle", fontName="Helvetica-Oblique", fontSize=10.5,
+                                     textColor=GREY, spaceAfter=18)
+    h1_style = ParagraphStyle("H1", fontName="Helvetica-Bold", fontSize=13,
+                               textColor=NAVY, spaceBefore=18, spaceAfter=8)
+    h2_style = ParagraphStyle("H2", fontName="Helvetica-Bold", fontSize=10.5,
+                               textColor=BLACK, spaceBefore=10, spaceAfter=6)
+    body_style = ParagraphStyle("Body", fontName="Helvetica", fontSize=10, leading=15,
+                                 textColor=BLACK, spaceAfter=8, alignment=4)
+    caption_style = ParagraphStyle("Caption", fontName="Helvetica-Oblique", fontSize=8.5,
+                                    textColor=GREY, spaceAfter=10)
+    header_text_style = ParagraphStyle("HeaderText", fontName="Helvetica", leading=16)
+
+    generated_at = datetime.now(timezone.utc).strftime("%B %d, %Y — %H:%M UTC")
     qr_path = make_qr_code()
 
-    story = []
+    latest_date = df["run_date"].max()
+    latest = df[df["run_date"] == latest_date]
+    n_products = insights["num_products_tracked"]
+    n_runs = insights["num_runs"]
+    anomalies = ml_summary["anomalies"]
+    forecasts = ml_summary["forecasts"]
 
-    story.append(Paragraph("TREND", section_style))
-    story.append(RLImage(chart_paths["avg_price_trend"], width=6.6 * inch, height=2.5 * inch))
-    story.append(Spacer(1, 4))
-    story.append(Paragraph("Average price across all tracked products, per scrape run.", caption_style))
-    story.append(Spacer(1, 18))
-
-    story.append(Paragraph("CATEGORY &amp; DISTRIBUTION", section_style))
-    two_col = Table(
-        [[RLImage(chart_paths["category_price"], width=3.15 * inch, height=2.3 * inch),
-          RLImage(chart_paths["price_histogram"], width=3.15 * inch, height=2.3 * inch)]],
-        colWidths=[3.25 * inch, 3.25 * inch],
-    )
-    two_col.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
-    story.append(two_col)
-    story.append(Spacer(1, 18))
-
-    story.append(Paragraph("AVAILABILITY", section_style))
-    two_col_2 = Table(
-        [[RLImage(chart_paths["stock_donut"], width=2.8 * inch, height=2.8 * inch),
-          RLImage(chart_paths["stock_rate_trend"], width=3.5 * inch, height=2.3 * inch)]],
-        colWidths=[3.25 * inch, 3.25 * inch],
-    )
-    two_col_2.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
-    story.append(two_col_2)
-    story.append(Spacer(1, 18))
-
-    story.append(Paragraph("RATING DISTRIBUTION", section_style))
-    story.append(RLImage(chart_paths["rating_distribution"], width=4.5 * inch, height=2.3 * inch))
-    story.append(Spacer(1, 22))
-
-    def styled_table(rows, col_widths):
+    def plain_table(rows, col_widths):
         t = Table(rows, hAlign="LEFT", colWidths=col_widths)
         t.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), PDF_PANEL_C),
-            ("TEXTCOLOR", (0, 0), (-1, 0), PDF_TEXT_C),
-            ("FONTNAME", (0, 0), (-1, 0), "Courier-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#dcdcdc")),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.75, BLACK),
+            ("LINEBELOW", (0, -1), (-1, -1), 0.5, LINE),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f7f7")]),
             ("TOPPADDING", (0, 0), (-1, -1), 5),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
         ]))
         return t
 
-    story.append(Paragraph("PRICE MOVEMENT — FIRST RUN VS LATEST", section_style))
-    movers = insights["movers"]
-    if not movers.empty:
-        rows = [["Product", "First £", "Latest £", "% Change"]]
-        for title, row in movers.iterrows():
-            short_title = (title[:38] + "…") if len(title) > 38 else title
-            rows.append([short_title, f"{row['first_price']:.2f}", f"{row['last_price']:.2f}", f"{row['pct_change']}%"])
-        story.append(styled_table(rows, [3.2 * inch, 1.1 * inch, 1.1 * inch, 1.1 * inch]))
-    else:
-        story.append(Paragraph("Awaiting second scrape run for comparison data.", caption_style))
-    story.append(Spacer(1, 18))
+    story = []
 
-    story.append(Paragraph("TOP 10 &mdash; MOST &amp; LEAST EXPENSIVE", section_style))
-    exp_rows = [["Most Expensive", "Category", "£"]]
-    for _, row in insights["top_expensive"].iterrows():
-        title = (row["title"][:26] + "…") if len(row["title"]) > 26 else row["title"]
-        exp_rows.append([title, row["category"], f"{row['price_gbp']:.2f}"])
-    cheap_rows = [["Least Expensive", "Category", "£"]]
-    for _, row in insights["top_cheap"].iterrows():
-        title = (row["title"][:26] + "…") if len(row["title"]) > 26 else row["title"]
-        cheap_rows.append([title, row["category"], f"{row['price_gbp']:.2f}"])
-
-    side_by_side = Table(
-        [[styled_table(exp_rows, [1.7 * inch, 0.9 * inch, 0.6 * inch]),
-          styled_table(cheap_rows, [1.7 * inch, 0.9 * inch, 0.6 * inch])]],
-        colWidths=[3.25 * inch, 3.25 * inch],
+    # ---------- Header with QR code top-right ----------
+    header = Table(
+        [[
+            Paragraph(f"<b>Product Price Monitor</b><br/>"
+                      f"<font size=10 color='#555555'><i>Machine Learning Analysis Report</i></font><br/>"
+                      f"<font size=8.5 color='#777777'>Generated {generated_at}</font>",
+                      header_text_style),
+            RLImage(qr_path, width=0.75 * inch, height=0.75 * inch),
+        ]],
+        colWidths=[5.3 * inch, 0.9 * inch],
     )
-    side_by_side.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
-    story.append(side_by_side)
+    header.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+    ]))
+    story.append(header)
 
-    def on_first_page(canvas_obj, doc_obj):
-        draw_cover(canvas_obj, doc_obj, insights, headline, qr_path, generated_at)
+    hr = Table([[""]], colWidths=[6.2 * inch], rowHeights=[1])
+    hr.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), 0.75, LINE)]))
+    story.append(Spacer(1, 8))
+    story.append(hr)
+    story.append(Spacer(1, 10))
+
+    # ---------- Executive summary ----------
+    story.append(Paragraph("Executive Summary", h1_style))
+
+    summary_text = (
+        f"This report summarizes automated price monitoring across {n_products} tracked products "
+        f"over {n_runs} scrape run{'s' if n_runs != 1 else ''}. Two machine learning techniques were "
+        f"applied to the collected data: anomaly detection, to identify products priced unusually "
+        f"relative to their category, and price forecasting, to project short-term price movement "
+        f"based on historical trend. "
+    )
+    if not anomalies.empty:
+        summary_text += (
+            f"The analysis identified {len(anomalies)} product{'s' if len(anomalies) != 1 else ''} "
+            f"with pricing that falls outside the expected range for its category. "
+        )
+    else:
+        summary_text += "No pricing anomalies were identified in the most recent run. "
+
+    if not forecasts.empty:
+        summary_text += (
+            f"Among products with sufficient history, {ml_summary['trending_up']} show an upward "
+            f"price trend and {ml_summary['trending_down']} show a downward trend. {ml_summary['confidence_note']}"
+        )
+    else:
+        summary_text += ml_summary["confidence_note"]
+
+    story.append(Paragraph(summary_text, body_style))
+
+    # ---------- Anomaly detection section ----------
+    story.append(Paragraph("Anomaly Detection", h1_style))
+    story.append(Paragraph(
+        "Each product's latest price is compared against the mean and standard deviation of its "
+        "own category, using a Z-score threshold of 1.5 standard deviations. To prevent a single "
+        "extreme value from distorting its own baseline, each product is excluded from the "
+        "calculation of its category's mean and standard deviation before being scored against it. "
+        "This avoids a common statistical pitfall where an outlier masks itself by pulling the "
+        "average toward its own value.",
+        body_style
+    ))
+
+    if "anomaly_scatter" in chart_paths:
+        story.append(RLImage(chart_paths["anomaly_scatter"], width=6.0 * inch, height=2.3 * inch))
+        story.append(Paragraph(
+            "Figure 1. Price by product for the latest scrape run. Each point represents one "
+            "product; flagged anomalies are shown larger and in a distinct color.",
+            caption_style
+        ))
+
+        # Data-driven explanation of what the chart shows
+        cat_price_range = latest.groupby("category")["price_gbp"].agg(["min", "max"])
+        widest_cat = cat_price_range.assign(range=lambda d: d["max"] - d["min"])["range"].idxmax()
+        widest_range = cat_price_range.loc[widest_cat]
+        chart1_explain = (
+            f"Across the {latest['category'].nunique()} tracked categories, price spread varies "
+            f"considerably: {widest_cat} shows the widest range in this run, from "
+            f"£{widest_range['min']:.2f} to £{widest_range['max']:.2f}. "
+        )
+        if not anomalies.empty:
+            top_anomaly = anomalies.iloc[0]
+            chart1_explain += (
+                f"The most significant anomaly is \u201c{top_anomaly['title']}\u201d, priced at "
+                f"£{top_anomaly['price_gbp']:.2f} against a {top_anomaly['category']} category average "
+                f"of £{top_anomaly['cat_mean']:.2f} — a Z-score of {top_anomaly['z_score']:.2f}, "
+                f"placing it {top_anomaly['direction']} the expected range for its category."
+            )
+        else:
+            chart1_explain += "No products in this run fell outside the ±1.5 standard deviation threshold."
+        story.append(Paragraph(chart1_explain, body_style))
+
+    if not anomalies.empty:
+        rows = [["Product", "Category", "Price", "Category Avg", "Z-Score", "Direction"]]
+        for _, row in anomalies.iterrows():
+            title = (row["title"][:26] + "…") if len(row["title"]) > 26 else row["title"]
+            rows.append([
+                title, row["category"], f"£{row['price_gbp']:.2f}",
+                f"£{row['cat_mean']:.2f}", f"{row['z_score']:.2f}", row["direction"].capitalize(),
+            ])
+        story.append(Spacer(1, 6))
+        story.append(plain_table(rows, [1.8 * inch, 0.95 * inch, 0.75 * inch, 1.0 * inch, 0.75 * inch, 0.8 * inch]))
+        story.append(Spacer(1, 4))
+        story.append(Paragraph(
+            "Table 1. All products flagged as anomalous in the latest run, ranked by absolute "
+            "Z-score. A positive Z-score indicates a price above the category average; a negative "
+            "value indicates a price below it.",
+            caption_style
+        ))
+    else:
+        story.append(Paragraph("No products exceeded the anomaly threshold in this run.", body_style))
+
+    story.append(PageBreak())
+
+    # ---------- Price forecast section ----------
+    story.append(Paragraph("Price Forecast", h1_style))
+    story.append(Paragraph(
+        "A linear regression model is fit to each product's price history, using scrape run "
+        "sequence as the independent variable, to project price for the next scheduled run. "
+        "This is a simple trend-following method: it assumes the rate of change observed so far "
+        f"will continue, and does not account for external market factors. {ml_summary['confidence_note']}",
+        body_style
+    ))
+
+    if not forecasts.empty:
+        if "forecast_lines" in chart_paths:
+            story.append(RLImage(chart_paths["forecast_lines"], width=6.0 * inch, height=2.9 * inch))
+            story.append(Paragraph(
+                "Figure 2. Actual price history (solid lines) and projected next-period price "
+                "(dashed lines, diamond marker) for the five products with the largest projected "
+                "percentage change.",
+                caption_style
+            ))
+
+            top_forecast = forecasts.iloc[0]
+            direction_word = "increase" if top_forecast["trend"] == "up" else (
+                "decrease" if top_forecast["trend"] == "down" else "remain flat"
+            )
+            chart2_explain = (
+                f"The product with the largest projected movement is \u201c{top_forecast['title']}\u201d, "
+                f"currently priced at £{top_forecast['current_price']:.2f} and projected to "
+                f"{direction_word} to approximately £{top_forecast['forecast_price']:.2f} "
+                f"({top_forecast['pct_change']:+.1f}%) by the next scrape run. "
+            )
+            if n_runs <= 2:
+                chart2_explain += (
+                    "With only a small number of historical points, this projection should be "
+                    "treated as directional rather than precise — it will sharpen as more weekly "
+                    "runs accumulate."
+                )
+            else:
+                chart2_explain += (
+                    f"This projection is based on {n_runs} historical data points per product and "
+                    "reflects the linear trend observed to date."
+                )
+            story.append(Paragraph(chart2_explain, body_style))
+
+        rows = [["Product", "Current Price", "Forecast Price", "Change", "Trend"]]
+        for _, row in forecasts.iterrows():
+            title = (row["title"][:28] + "…") if len(row["title"]) > 28 else row["title"]
+            rows.append([
+                title, f"£{row['current_price']:.2f}", f"£{row['forecast_price']:.2f}",
+                f"{row['pct_change']}%", row["trend"].capitalize(),
+            ])
+        story.append(Spacer(1, 6))
+        story.append(plain_table(rows, [2.2 * inch, 1.1 * inch, 1.1 * inch, 0.85 * inch, 0.85 * inch]))
+        story.append(Spacer(1, 4))
+        story.append(Paragraph(
+            "Table 2. The five products with the largest projected price change, ranked by "
+            "absolute percentage change.",
+            caption_style
+        ))
+    else:
+        story.append(Paragraph(
+            "Forecasting requires at least two scrape runs and will populate automatically once "
+            "additional data has been collected.",
+            body_style
+        ))
+
+    story.append(PageBreak())
+
+    # ---------- Reference charts with explanatory narrative ----------
+    story.append(Paragraph("Reference Charts", h1_style))
+    story.append(Paragraph(
+        "The charts in this section summarize the underlying dataset used in the analysis above "
+        "and are provided for additional context.",
+        body_style
+    ))
+
+    avg_by_date = df.groupby("run_date")["price_gbp"].mean()
+    trend_explain = f"Average price across all tracked products currently stands at £{insights['avg_price_latest']:.2f}. "
+    if len(avg_by_date) >= 2:
+        change = avg_by_date.iloc[-1] - avg_by_date.iloc[0]
+        pct = (change / avg_by_date.iloc[0] * 100) if avg_by_date.iloc[0] else 0
+        direction = "risen" if change > 0 else ("fallen" if change < 0 else "stayed flat")
+        trend_explain += (
+            f"Since the first recorded run, the overall average has {direction} by "
+            f"£{abs(change):.2f} ({pct:+.1f}%)."
+        )
+    else:
+        trend_explain += "This is the first recorded run; a trend line will appear once a second run has been collected."
+
+    story.append(Paragraph("Average Price Over Time", h2_style))
+    story.append(RLImage(chart_paths["avg_price_trend"], width=6.2 * inch, height=2.3 * inch))
+    story.append(Paragraph(trend_explain, body_style))
+
+    cat_avg = latest.groupby("category")["price_gbp"].mean().sort_values(ascending=False)
+    cat_explain = (
+        f"{cat_avg.index[0]} carries the highest average price in this run, at "
+        f"£{cat_avg.iloc[0]:.2f}, while {cat_avg.index[-1]} is the lowest, at £{cat_avg.iloc[-1]:.2f}."
+    )
+    story.append(Paragraph("Average Price by Category", h2_style))
+    story.append(RLImage(chart_paths["category_price"], width=6.2 * inch, height=2.3 * inch))
+    story.append(Paragraph(cat_explain, body_style))
+
+    story.append(PageBreak())
+
+    hist_explain = (
+        f"Prices in the latest run range from £{latest['price_gbp'].min():.2f} to "
+        f"£{latest['price_gbp'].max():.2f}, with a median of £{latest['price_gbp'].median():.2f}. "
+        "The distribution below shows how tracked products are spread across that range."
+    )
+    story.append(Paragraph("Price Distribution", h2_style))
+    story.append(RLImage(chart_paths["price_histogram"], width=6.2 * inch, height=2.3 * inch))
+    story.append(Paragraph(hist_explain, body_style))
+
+    in_stock_count = int(latest["in_stock"].sum())
+    out_stock_count = int((~latest["in_stock"]).sum())
+    stock_explain = (
+        f"Of the {n_products} products tracked in the latest run, {in_stock_count} are currently "
+        f"in stock and {out_stock_count} are out of stock."
+    )
+    story.append(Paragraph("Stock Availability", h2_style))
+    story.append(RLImage(chart_paths["stock_donut"], width=3.0 * inch, height=3.0 * inch))
+    story.append(Paragraph(stock_explain, body_style))
 
     def on_later_pages(canvas_obj, doc_obj):
-        draw_page_frame(canvas_obj, doc_obj)
+        width, height = letter
+        canvas_obj.saveState()
+        canvas_obj.setStrokeColor(LINE)
+        canvas_obj.setLineWidth(0.5)
+        canvas_obj.line(0.9 * inch, 0.6 * inch, width - 0.9 * inch, 0.6 * inch)
+        canvas_obj.setFillColor(GREY)
+        canvas_obj.setFont("Helvetica-Oblique", 8)
+        canvas_obj.drawString(0.9 * inch, 0.45 * inch, "Product Price Monitor — ML Analysis Report")
+        canvas_obj.drawRightString(width - 0.9 * inch, 0.45 * inch, f"Page {doc_obj.page}")
+        canvas_obj.restoreState()
 
-    doc.build(story, onFirstPage=on_first_page, onLaterPages=on_later_pages)
+    doc.build(story, onLaterPages=on_later_pages)
     print(f"Wrote {out_path}")
 
 
@@ -892,8 +1055,12 @@ def main():
     insights = compute_insights(df)
     chart_paths = make_charts(df)
 
+    ml_summary = build_ml_summary(df)
+    ml_chart_paths = make_ml_charts(df, ml_summary)
+    chart_paths.update(ml_chart_paths)
+
     generate_html(df, insights)
-    generate_pdf(df, insights, chart_paths)
+    generate_pdf(df, insights, chart_paths, ml_summary)
 
 
 if __name__ == "__main__":
