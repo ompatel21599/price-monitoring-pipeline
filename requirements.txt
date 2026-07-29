@@ -4,3 +4,4 @@ pandas
 matplotlib
 reportlab
 qrcode[pil]
+scikit-learn
