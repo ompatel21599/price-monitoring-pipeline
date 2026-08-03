@@ -123,6 +123,55 @@ synthetic sample used during local development. It's a reminder that
 "works on my machine" and "works in production" are genuinely different
 claims, and CI is what catches the gap.
 
+### Wiring up automated email delivery
+
+The dashboard captures subscriber emails via a popup (backed by
+Supabase), but originally nothing was actually sent to them. Closing that
+loop required chaining together several pieces: a Postgres trigger on the
+`subscribers` table, calling a Supabase Edge Function over HTTP via the
+`pg_net` extension, which in turn calls a transactional email API and
+attaches the current PDF report.
+
+Getting this working end-to-end meant debugging through several distinct
+failure layers, one at a time — and ultimately meant switching providers
+once the constraint became clear.
+
+1. **401 Unauthorized** — Supabase Edge Functions require a valid
+   Supabase auth token on every request by default. A Postgres trigger
+   calling the function via `pg_net` has no such token, since it's an
+   internal database-to-function call, not a request from a logged-in
+   user. Fixed by disabling JWT verification for this specific function,
+   since it's only ever invoked internally.
+2. **500 Internal Server Error** — the function itself was crashing with
+   no logged reason. Adding explicit `console.log`/`console.error` calls
+   around each external call (fetching the PDF, calling the email API)
+   turned an opaque failure into a readable one.
+3. **403 from Resend** — `"You can only send test emails to your own
+   email address"`. Resend's free tier refuses to send to any recipient
+   other than the account owner's verified email unless a custom sending
+   domain is verified. That's a real limitation for a project meant to
+   email arbitrary subscribers, not a bug to work around.
+4. **Switched providers to Brevo**, which allows sending to arbitrary
+   recipients on its free tier without domain verification — closer to
+   what the feature actually needed.
+5. **401 from Brevo, unrecognized IP** — a security guardrail that blocks
+   API calls from IP addresses it hasn't seen before. Resolved by
+   authorizing the IP directly in Brevo's dashboard.
+6. **"Sender is not valid"** — Brevo still requires the `from` address
+   itself to be a verified sender (or the domain behind it verified),
+   even though the recipient restriction is gone. This is where I stopped:
+   verifying a sender identity is a reasonable one-time setup step for a
+   real product, but not one worth pushing through purely to make a demo
+   project's placeholder sender address technically deliverable.
+
+**Current state:** the full pipeline — subscribe → database trigger →
+Edge Function → PDF fetch → email send — is built, deployed, and was
+verified working end-to-end up to the final send step. What remains is a
+one-time account setup step (verifying a sender email or domain with
+Brevo), not a code or architecture change. I chose to stop and document
+this rather than spend further time on account verification flows that
+don't reflect additional engineering work.
+
 ## What this project demonstrates
 
 - Data collection under real-world constraints (scraping, scheduling, rate limiting)
@@ -135,13 +184,17 @@ claims, and CI is what catches the gap.
 - Communicating findings to two different audiences in two different formats
 - Debugging across the full stack — Python, JavaScript, CSS, CI
   configuration, and statistics
+- Integration across independent third-party systems (Supabase, GitHub
+  Pages, and a transactional email provider), including recognizing when
+  a limitation is provider policy rather than something to code around,
+  and switching providers rather than fighting the wrong constraint
 
 ## What I'd do differently with more time
 
 - Move from CSV storage to SQLite as history grows, for easier querying
-- Add automatic email delivery of the PDF to dashboard subscribers
-  (currently the signup is captured; the send step is a natural next
-  addition)
+- Verify a sender identity (or a custom domain) with Brevo so the weekly
+  and welcome emails can actually deliver to subscribers, completing the
+  one remaining setup step in the email pipeline
 - Track more categories and a longer history window before leaning harder
   on the forecasting model, since its confidence is explicitly tied to how
   much data exists
